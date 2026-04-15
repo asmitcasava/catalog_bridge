@@ -66,13 +66,15 @@
    "fieldname": "whatsapp_account",
    "fieldtype": "Link",
    "label": "WhatsApp Account",
+   "mandatory_depends_on": "eval:doc.platform_type=='Meta Catalog'",
    "options": "WhatsApp Account"
   },
   {
+   "depends_on": "eval:doc.platform_type=='Meta Catalog'",
    "fieldname": "catalog_id",
    "fieldtype": "Data",
    "label": "Catalog ID",
-   "reqd": 1
+   "mandatory_depends_on": "eval:doc.platform_type=='Meta Catalog'"
   },
   {
    "fieldname": "column_break_conn",

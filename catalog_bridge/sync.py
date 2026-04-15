@@ -73,7 +73,10 @@ def sync_item(website_item, platform, fields_changed=None):
     except Exception as e:
         log.status = "Failed"
         log.error_message = str(e)[:500]
-        frappe.log_error("Catalog Bridge Sync", f"Failed to sync {website_item} to {platform}: {e}")
+        frappe.log_error(
+            title=f"Catalog Bridge: sync {website_item} to {platform}",
+            message=frappe.get_traceback(),
+        )
 
     log.save(ignore_permissions=True)
     frappe.db.commit()
@@ -120,7 +123,10 @@ def delete_item(website_item, platform):
     except Exception as e:
         log.status = "Failed"
         log.error_message = str(e)[:500]
-        frappe.log_error("Catalog Bridge Delete", f"Failed to delete {website_item} from {platform}: {e}")
+        frappe.log_error(
+            title=f"Catalog Bridge: delete {website_item} from {platform}",
+            message=frappe.get_traceback(),
+        )
 
     log.save(ignore_permissions=True)
     frappe.db.commit()

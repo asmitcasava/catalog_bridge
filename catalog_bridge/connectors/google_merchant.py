@@ -71,7 +71,11 @@ class GoogleMerchantConnector(CatalogConnector):
     def _get_data_source(self):
         """Get or auto-detect the API data source for this merchant account."""
         if self.platform.google_data_source:
-            return self.platform.google_data_source
+            ds = self.platform.google_data_source
+            # Normalize: if user entered just the numeric ID, build the full path
+            if not ds.startswith("accounts/"):
+                ds = f"{self._parent}/dataSources/{ds}"
+            return ds
 
         # Auto-detect: find the first API-type data source
         from google.shopping.merchant_datasources_v1 import DataSourcesServiceClient
@@ -91,7 +95,10 @@ class GoogleMerchantConnector(CatalogConnector):
                     frappe.db.commit()
                     return data_source_name
         except Exception as e:
-            frappe.log_error("Catalog Bridge", f"Failed to auto-detect data source: {e}")
+            frappe.log_error(
+                title="Catalog Bridge: failed to auto-detect Google data source",
+                message=frappe.get_traceback(),
+            )
 
         frappe.throw(
             "Could not find an API data source in your Merchant Center account. "
@@ -112,7 +119,7 @@ class GoogleMerchantConnector(CatalogConnector):
             "link": self._build_product_url(wi),
             "image_link": self._build_image_url(wi),
             "brand": wi.brand or "",
-            "condition": "new",
+            "condition": "NEW",
             "content_language": self._content_language,
             "feed_label": self._feed_label,
         }
@@ -187,7 +194,6 @@ class GoogleMerchantConnector(CatalogConnector):
             offer_id=product_data["offer_id"],
             content_language=product_data.get("content_language", self._content_language),
             feed_label=product_data.get("feed_label", self._feed_label),
-            channel="ONLINE",
             product_attributes=ProductAttributes(**attrs),
         )
 
@@ -242,7 +248,10 @@ class GoogleMerchantConnector(CatalogConnector):
                     "availability": attrs.availability if attrs else "",
                 })
         except Exception as e:
-            frappe.log_error("Catalog Bridge", f"Google list_products failed: {e}")
+            frappe.log_error(
+                title="Catalog Bridge: Google list_products failed",
+                message=frappe.get_traceback(),
+            )
 
         return products
 
@@ -326,8 +335,8 @@ class GoogleMerchantConnector(CatalogConnector):
             "actual_qty",
         )
         if qty is None:
-            return "out_of_stock"
-        return "in_stock" if float(qty) > 0 else "out_of_stock"
+            return "OUT_OF_STOCK"
+        return "IN_STOCK" if float(qty) > 0 else "OUT_OF_STOCK"
 
     def _build_product_url(self, wi):
         """Build product URL from Jinja template."""
@@ -383,7 +392,7 @@ class GoogleMerchantConnector(CatalogConnector):
                 except (ValueError, TypeError):
                     continue
             elif mapping.transform == "Boolean to Availability":
-                source_val = "in_stock" if source_val else "out_of_stock"
+                source_val = "IN_STOCK" if source_val else "OUT_OF_STOCK"
 
             data[mapping.target_field] = source_val
 

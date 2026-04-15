@@ -113,8 +113,8 @@ def run_reconciliation():
             _reconcile_platform(platform_name)
         except Exception as e:
             frappe.log_error(
-                "Catalog Bridge Reconciliation",
-                f"Reconciliation failed for {platform_name}: {e}",
+                title=f"Catalog Bridge: reconciliation failed for {platform_name}",
+                message=frappe.get_traceback(),
             )
 
 
@@ -152,9 +152,8 @@ def _reconcile_platform(platform_name):
     orphans = platform_ids - local_ids
     if orphans:
         frappe.log_error(
-            "Catalog Bridge Reconciliation",
-            f"Orphan products on {platform_name} (on platform but not in ERPNext): "
-            f"{', '.join(list(orphans)[:20])}",
+            title=f"Catalog Bridge: orphan products on {platform_name}",
+            message=f"Products on platform but not in ERPNext: {', '.join(list(orphans)[:20])}",
         )
 
     frappe.db.set_value("Catalog Platform", platform_name, "last_synced", now_datetime())
@@ -207,25 +206,54 @@ def initial_sync(platform_name):
             product_data = connector.transform(wi)
             products.append(product_data)
         except Exception as e:
-            frappe.log_error("Catalog Bridge Initial Sync", f"Transform failed for {wi_ref.name}: {e}")
+            frappe.log_error(
+                title=f"Catalog Bridge: transform failed for {wi_ref.name}",
+                message=frappe.get_traceback(),
+            )
 
     if not products:
         return "No published Website Items found."
 
     results = connector.bulk_push(products)
 
-    # Create sync logs for the bulk operation
-    for wi_ref in website_items:
+    # Build a set of failed offer_ids for accurate sync log status
+    failed_ids = set()
+    for err in results.get("errors", []):
+        # Error format: "offer_id: error message"
+        if ":" in err:
+            failed_ids.add(err.split(":")[0].strip())
+
+    # Create sync logs per item with accurate status
+    for wi_ref, product_data in zip(website_items, products):
+        offer_id = product_data.get("offer_id", "")
+        is_failed = offer_id in failed_ids
         log = frappe.new_doc("Catalog Sync Log")
         log.website_item = wi_ref.name
         log.platform = platform_name
         log.action = "Create"
-        log.status = "Success"
+        log.status = "Failed" if is_failed else "Success"
         log.synced_at = now_datetime()
+        log.request_data = json.dumps(product_data, default=str)
+        if is_failed:
+            # Find the matching error message
+            for err in results["errors"]:
+                if err.startswith(offer_id):
+                    log.error_message = err[:500]
+                    break
         log.insert(ignore_permissions=True)
 
     frappe.db.set_value("Catalog Platform", platform_name, "last_synced", now_datetime())
     frappe.db.commit()
+
+    # Log errors to Error Log for visibility
+    if results["errors"]:
+        frappe.log_error(
+            title=f"Catalog Bridge: initial_sync to {platform_name}",
+            message=(
+                f"Failed {results['failed']} of {len(products)} products.\n\n"
+                + "\n".join(results["errors"])
+            ),
+        )
 
     msg = f"Synced {results['success']} of {len(products)} products."
     if results["failed"]:
