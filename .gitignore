@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.tox/
+node_modules/
+.env
+catalog_bridge/setup_platform.py
