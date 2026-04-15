@@ -6,11 +6,17 @@ from frappe.model.document import Document
 
 class CatalogPlatform(Document):
     def validate(self):
-        if self.platform_type == "Meta Catalog" and not self.whatsapp_account:
-            frappe.throw("WhatsApp Account is required for Meta Catalog.")
+        if self.platform_type == "Meta Catalog":
+            if not self.whatsapp_account:
+                frappe.throw("WhatsApp Account is required for Meta Catalog.")
+            if not self.catalog_id:
+                frappe.throw("Catalog ID is required for Meta Catalog.")
 
-        if not self.catalog_id:
-            frappe.throw("Catalog ID is required.")
+        if self.platform_type == "Google Merchant Center":
+            if not self.google_service_account_json:
+                frappe.throw("Service Account JSON is required for Google Merchant Center.")
+            if not self.google_merchant_id:
+                frappe.throw("Merchant ID is required for Google Merchant Center.")
 
         if not self.price_list:
             frappe.throw("Price List is required.")

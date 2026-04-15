@@ -15,6 +15,11 @@
   "price_list",
   "google_section",
   "google_service_account_json",
+  "google_merchant_id",
+  "column_break_google",
+  "google_content_language",
+  "google_feed_label",
+  "google_data_source",
   "url_section",
   "frontend_url",
   "product_url_template",
@@ -90,6 +95,36 @@
    "fieldname": "google_service_account_json",
    "fieldtype": "Attach",
    "label": "Service Account JSON"
+  },
+  {
+   "description": "Your Merchant Center account ID (numeric). Found in Merchant Center > Settings > Account.",
+   "fieldname": "google_merchant_id",
+   "fieldtype": "Data",
+   "label": "Merchant ID"
+  },
+  {
+   "fieldname": "column_break_google",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "en",
+   "description": "ISO 639-1 language code (e.g. en, hi, fr).",
+   "fieldname": "google_content_language",
+   "fieldtype": "Data",
+   "label": "Content Language"
+  },
+  {
+   "default": "online",
+   "description": "Feed label for product targeting (e.g. online, IN, US).",
+   "fieldname": "google_feed_label",
+   "fieldtype": "Data",
+   "label": "Feed Label"
+  },
+  {
+   "description": "API data source name from Merchant Center. Format: accounts/{id}/dataSources/{id}. Leave blank to auto-detect.",
+   "fieldname": "google_data_source",
+   "fieldtype": "Data",
+   "label": "Data Source"
   },
   {
    "fieldname": "url_section",
