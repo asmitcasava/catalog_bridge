@@ -22,8 +22,14 @@ def on_website_item_update(doc, method):
 
 
 def on_website_item_trash(doc, method):
-    """Website Item trashed — delete from all platforms."""
+    """Website Item trashed — delete from all platforms and clean up linked records."""
     _clear_item_cache(doc)
+
+    # Delete linked records so Frappe's link check doesn't block
+    for dt in ("Google Product Feed", "Catalog Sync Log"):
+        linked = frappe.get_all(dt, filters={"website_item": doc.name}, pluck="name")
+        for name in linked:
+            frappe.delete_doc(dt, name, ignore_permissions=True)
 
     if doc.published:
         delete_item_from_all_platforms(doc.name)

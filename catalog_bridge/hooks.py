@@ -5,6 +5,8 @@ app_description = "Sync Website Items to Meta Catalog and Google Merchant Center
 app_email = "admin@casava.tech"
 app_license = "mit"
 
+app_include_js = "/assets/catalog_bridge/js/google_setup_wizard.js"
+
 required_apps = ["frappe/frappe_whatsapp", "frappe/webshop"]
 
 doc_events = {

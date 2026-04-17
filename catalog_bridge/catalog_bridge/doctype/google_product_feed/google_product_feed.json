@@ -1,0 +1,194 @@
+{
+ "actions": [],
+ "autoname": "field:offer_id",
+ "creation": "2026-04-16 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "offer_id",
+  "platform",
+  "website_item",
+  "google_status",
+  "last_fetched",
+  "product_details_section",
+  "title",
+  "brand",
+  "column_break_product",
+  "condition",
+  "availability",
+  "price",
+  "urls_section",
+  "link",
+  "column_break_urls",
+  "image_link",
+  "issues_section",
+  "issues_display",
+  "raw_data_section",
+  "google_product_name",
+  "issues",
+  "destination_statuses_raw"
+ ],
+ "fields": [
+  {
+   "fieldname": "offer_id",
+   "fieldtype": "Data",
+   "label": "Offer ID",
+   "in_list_view": 1,
+   "reqd": 1,
+   "unique": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "platform",
+   "fieldtype": "Link",
+   "label": "Platform",
+   "options": "Catalog Platform",
+   "read_only": 1
+  },
+  {
+   "fieldname": "website_item",
+   "fieldtype": "Link",
+   "label": "Website Item",
+   "options": "Website Item",
+   "read_only": 1
+  },
+  {
+   "fieldname": "google_status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "\nApproved\nDisapproved\nPending\nUnknown\nRemoved",
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_fetched",
+   "fieldtype": "Datetime",
+   "label": "Last Fetched",
+   "read_only": 1
+  },
+  {
+   "fieldname": "product_details_section",
+   "fieldtype": "Section Break",
+   "label": "Product Details"
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "label": "Title",
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "brand",
+   "fieldtype": "Data",
+   "label": "Brand",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_product",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "condition",
+   "fieldtype": "Data",
+   "label": "Condition",
+   "read_only": 1
+  },
+  {
+   "fieldname": "availability",
+   "fieldtype": "Data",
+   "label": "Availability",
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "price",
+   "fieldtype": "Data",
+   "label": "Price",
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "urls_section",
+   "fieldtype": "Section Break",
+   "label": "URLs"
+  },
+  {
+   "fieldname": "link",
+   "fieldtype": "Data",
+   "label": "Product Link",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_urls",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "image_link",
+   "fieldtype": "Data",
+   "label": "Image Link",
+   "read_only": 1
+  },
+  {
+   "fieldname": "issues_section",
+   "fieldtype": "Section Break",
+   "label": "Issues"
+  },
+  {
+   "fieldname": "issues_display",
+   "fieldtype": "HTML",
+   "label": "Issues Display",
+   "read_only": 1
+  },
+  {
+   "fieldname": "raw_data_section",
+   "fieldtype": "Section Break",
+   "label": "Raw Data",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "google_product_name",
+   "fieldtype": "Data",
+   "label": "Google Product Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "issues",
+   "fieldtype": "Small Text",
+   "label": "Issues (JSON)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "destination_statuses_raw",
+   "fieldtype": "Small Text",
+   "label": "Destination Statuses (JSON)",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-04-16 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Catalog Bridge",
+ "name": "Google Product Feed",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 0,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}
