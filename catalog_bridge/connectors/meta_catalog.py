@@ -5,7 +5,6 @@ import time
 
 import frappe
 from frappe.integrations.utils import make_request, make_post_request
-from frappe.utils import strip_html
 
 from catalog_bridge.connectors.base import CatalogConnector
 
@@ -41,47 +40,13 @@ class MetaCatalogConnector(CatalogConnector):
         creds = self._get_credentials()
         return f"{creds['url']}/{creds['version']}"
 
-    def transform(self, website_item) -> dict:
-        """Transform Website Item to Meta Catalog product format."""
-        wi = website_item
-        if isinstance(wi, str):
-            wi = frappe.get_doc("Website Item", wi)
-
-        data = {
-            "retailer_id": wi.item_code,
-            "name": wi.web_item_name or wi.item_name,
-            "description": strip_html(wi.description or wi.web_long_description or ""),
-            "url": self._build_product_url(wi),
-            "image_url": self._build_image_url(wi),
-            "brand": wi.brand or "",
-            "category": wi.item_group or "",
-        }
-
-        if wi.short_description:
-            data["short_description"] = wi.short_description
-
-        # Price from configured price list
-        price_data = self._get_price(wi.item_code)
-        if price_data:
-            data["price"] = price_data["price"]
-            data["currency"] = price_data["currency"]
-
-        # Stock availability
-        availability = self._get_availability(wi)
-        if availability is not None:
-            data["availability"] = availability
-
-        # Apply custom field mapping overrides
-        data = self._apply_field_overrides(data, wi)
-
-        return data
-
     def push(self, product_data: dict) -> dict:
         """Upsert a product to Meta Catalog."""
         catalog_id = self.platform.catalog_id
         base = self._api_base()
+        id_field = self.get_id_field()
 
-        payload = [{"method": "UPDATE", "retailer_id": product_data["retailer_id"], "data": product_data}]
+        payload = [{"method": "UPDATE", "retailer_id": product_data[id_field], "data": product_data}]
 
         response = make_post_request(
             f"{base}/{catalog_id}/batch",
@@ -142,6 +107,7 @@ class MetaCatalogConnector(CatalogConnector):
         catalog_id = self.platform.catalog_id
         base = self._api_base()
         headers = self._headers()
+        id_field = self.get_id_field()
 
         results = {"success": 0, "failed": 0, "errors": []}
         batch_size = 50
@@ -152,7 +118,7 @@ class MetaCatalogConnector(CatalogConnector):
             for product in batch:
                 requests.append({
                     "method": "UPDATE",
-                    "retailer_id": product["retailer_id"],
+                    "retailer_id": product[id_field],
                     "data": product,
                 })
 
@@ -167,103 +133,6 @@ class MetaCatalogConnector(CatalogConnector):
                 results["failed"] += len(batch)
                 results["errors"].append(str(e))
 
-            # Rate limit: 200 calls/hour, be conservative
             time.sleep(0.5)
 
         return results
-
-    def _get_price(self, item_code):
-        """Get current price from the configured price list."""
-        price_list = self.platform.price_list
-        price_row = frappe.db.get_value(
-            "Item Price",
-            {
-                "item_code": item_code,
-                "price_list": price_list,
-                "selling": 1,
-            },
-            ["price_list_rate", "currency"],
-            as_dict=True,
-            order_by="valid_from desc",
-        )
-        if not price_row or not price_row.price_list_rate:
-            return None
-
-        return {
-            "price": int(float(price_row.price_list_rate) * 100),
-            "currency": price_row.currency,
-        }
-
-    def _get_availability(self, website_item):
-        """Get stock availability from Bin."""
-        if not website_item.website_warehouse:
-            return None
-
-        qty = frappe.db.get_value(
-            "Bin",
-            {"item_code": website_item.item_code, "warehouse": website_item.website_warehouse},
-            "actual_qty",
-        )
-        if qty is None:
-            return "out of stock"
-        return "in stock" if float(qty) > 0 else "out of stock"
-
-    def _build_product_url(self, wi):
-        """Build product URL from Jinja template."""
-        template = self.platform.product_url_template or "{{ frontend_url }}/{{ route }}"
-        frontend_url = self.platform.frontend_url or frappe.utils.get_url()
-        frontend_url = frontend_url.rstrip("/")
-
-        try:
-            return frappe.render_template(template, {
-                "frontend_url": frontend_url,
-                "route": wi.route or "",
-                "item_code": wi.item_code or "",
-                "item_name": wi.item_name or "",
-                "name": wi.name or "",
-                "web_item_name": wi.web_item_name or "",
-            })
-        except Exception:
-            return f"{frontend_url}/{wi.route or ''}"
-
-    def _build_image_url(self, wi):
-        """Build image URL. Absolute URLs pass through unchanged."""
-        image = wi.website_image or ""
-        if not image:
-            return ""
-        if image.startswith("http"):
-            return image
-
-        template = self.platform.image_url_template or "{{ frontend_url }}{{ website_image }}"
-        frontend_url = self.platform.frontend_url or frappe.utils.get_url()
-        frontend_url = frontend_url.rstrip("/")
-
-        try:
-            return frappe.render_template(template, {
-                "frontend_url": frontend_url,
-                "website_image": image,
-                "item_code": wi.item_code or "",
-            })
-        except Exception:
-            return f"{frontend_url}{image}"
-
-    def _apply_field_overrides(self, data, wi):
-        """Apply custom field mapping overrides from Catalog Platform child table."""
-        for mapping in self.platform.field_mapping or []:
-            source_val = wi.get(mapping.source_field, "")
-            if source_val is None:
-                source_val = ""
-
-            if mapping.transform == "Strip HTML":
-                source_val = strip_html(str(source_val))
-            elif mapping.transform == "Price to Cents":
-                try:
-                    source_val = int(float(source_val) * 100)
-                except (ValueError, TypeError):
-                    continue
-            elif mapping.transform == "Boolean to Availability":
-                source_val = "in stock" if source_val else "out of stock"
-
-            data[mapping.target_field] = source_val
-
-        return data

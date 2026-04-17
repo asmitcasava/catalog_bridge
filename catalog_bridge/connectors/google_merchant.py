@@ -3,9 +3,47 @@
 import time
 
 import frappe
-from frappe.utils import strip_html
 
 from catalog_bridge.connectors.base import CatalogConnector
+
+
+# Type registry: maps product_data keys to complex protobuf builders.
+# Keys not in this registry pass through as simple ProductAttributes kwargs.
+COMPLEX_FIELD_BUILDERS = {}
+
+
+def _build_price(product_data):
+    """Build a Google Price proto from price_amount_micros + price_currency."""
+    from google.shopping.type.types import Price
+
+    amount = product_data.pop("price_amount_micros", None)
+    currency = product_data.pop("price_currency", "INR")
+    if amount is None:
+        return None
+    return Price(amount_micros=int(amount), currency_code=currency)
+
+
+def _build_shipping_weight(product_data):
+    """Build a ShippingWeight proto from shipping_weight_value + shipping_weight_unit."""
+    from google.shopping.merchant_products_v1.types import ShippingWeight
+
+    value = product_data.pop("shipping_weight_value", None)
+    unit = product_data.pop("shipping_weight_unit", "kg")
+    if value is None:
+        return None
+    return ShippingWeight(value=float(value), unit=str(unit))
+
+
+COMPLEX_FIELD_BUILDERS["price"] = {
+    "keys": ["price_amount_micros", "price_currency"],
+    "attr": "price",
+    "builder": _build_price,
+}
+COMPLEX_FIELD_BUILDERS["shipping_weight"] = {
+    "keys": ["shipping_weight_value", "shipping_weight_unit"],
+    "attr": "shipping_weight",
+    "builder": _build_shipping_weight,
+}
 
 
 class GoogleMerchantConnector(CatalogConnector):
@@ -27,7 +65,6 @@ class GoogleMerchantConnector(CatalogConnector):
         if not json_file:
             frappe.throw("Service Account JSON is not configured on the Catalog Platform.")
 
-        # Read the attached JSON file
         file_doc = frappe.get_doc("File", {"file_url": json_file})
         file_path = file_doc.get_full_path()
 
@@ -72,29 +109,25 @@ class GoogleMerchantConnector(CatalogConnector):
         """Get or auto-detect the API data source for this merchant account."""
         if self.platform.google_data_source:
             ds = self.platform.google_data_source
-            # Normalize: if user entered just the numeric ID, build the full path
             if not ds.startswith("accounts/"):
                 ds = f"{self._parent}/dataSources/{ds}"
             return ds
 
-        # Auto-detect: find the first API-type data source
         from google.shopping.merchant_datasources_v1 import DataSourcesServiceClient
 
         ds_client = DataSourcesServiceClient(credentials=self._get_credentials())
         try:
             data_sources = ds_client.list_data_sources(parent=self._parent)
             for ds in data_sources:
-                # API data sources have primary_product_data_source with channel
                 if hasattr(ds, 'primary_product_data_source') and ds.primary_product_data_source:
                     data_source_name = ds.name
-                    # Cache it on the platform doc
                     frappe.db.set_value(
                         "Catalog Platform", self.platform.name,
                         "google_data_source", data_source_name,
                     )
                     frappe.db.commit()
                     return data_source_name
-        except Exception as e:
+        except Exception:
             frappe.log_error(
                 title="Catalog Bridge: failed to auto-detect Google data source",
                 message=frappe.get_traceback(),
@@ -106,94 +139,50 @@ class GoogleMerchantConnector(CatalogConnector):
             "then set the Data Source field on this platform."
         )
 
-    def transform(self, website_item) -> dict:
-        """Transform Website Item to Google Merchant product format."""
-        wi = website_item
-        if isinstance(wi, str):
-            wi = frappe.get_doc("Website Item", wi)
-
-        data = {
-            "offer_id": wi.item_code,
-            "title": wi.web_item_name or wi.item_name,
-            "description": strip_html(wi.description or wi.web_long_description or ""),
-            "link": self._build_product_url(wi),
-            "image_link": self._build_image_url(wi),
-            "brand": wi.brand or "",
-            "condition": "NEW",
-            "content_language": self._content_language,
-            "feed_label": self._feed_label,
-        }
-
-        if wi.item_group:
-            data["product_types"] = [wi.item_group]
-
-        # Price from configured price list
-        price_data = self._get_price(wi.item_code)
-        if price_data:
-            data["price_amount_micros"] = price_data["amount_micros"]
-            data["price_currency"] = price_data["currency"]
-
-        # Stock availability
-        availability = self._get_availability(wi)
-        if availability is not None:
-            data["availability"] = availability
-
-        # Apply custom field mapping overrides
-        data = self._apply_field_overrides(data, wi)
-
-        return data
-
     def push(self, product_data: dict) -> dict:
-        """Upsert a product to Google Merchant Center."""
+        """Upsert a product to Google Merchant Center using type registry."""
         from google.shopping.merchant_products_v1 import (
             InsertProductInputRequest,
             ProductInput,
         )
         from google.shopping.merchant_products_v1.types import ProductAttributes
-        from google.shopping.type.types import Price
 
         client = self._get_product_inputs_client()
         data_source = self._get_data_source()
 
-        # Build product attributes
+        # Work on a copy so we don't mutate the caller's dict
+        data = dict(product_data)
+        offer_id = data.pop("offer_id", None)
+        content_language = data.pop("content_language", self._content_language)
+        feed_label = data.pop("feed_label", self._feed_label)
+
         attrs = {}
 
-        if product_data.get("title"):
-            attrs["title"] = product_data["title"]
-        if product_data.get("description"):
-            attrs["description"] = product_data["description"]
-        if product_data.get("link"):
-            attrs["link"] = product_data["link"]
-        if product_data.get("image_link"):
-            attrs["image_link"] = product_data["image_link"]
-        if product_data.get("brand"):
-            attrs["brand"] = product_data["brand"]
-        if product_data.get("condition"):
-            attrs["condition"] = product_data["condition"]
-        if product_data.get("product_types"):
-            attrs["product_types"] = product_data["product_types"]
+        # Process complex fields via type registry
+        for _name, spec in COMPLEX_FIELD_BUILDERS.items():
+            if any(k in data for k in spec["keys"]):
+                result = spec["builder"](data)
+                if result is not None:
+                    attrs[spec["attr"]] = result
 
-        # Price
-        if product_data.get("price_amount_micros") is not None:
-            attrs["price"] = Price(
-                amount_micros=product_data["price_amount_micros"],
-                currency_code=product_data.get("price_currency", "INR"),
-            )
+        # GTIN / MPN — pass through if present
+        if data.get("gtin"):
+            attrs["gtins"] = [data.pop("gtin")]
+        if data.get("mpn"):
+            attrs["mpn"] = data.pop("mpn")
 
-        # Availability
-        if product_data.get("availability"):
-            attrs["availability"] = product_data["availability"]
-
-        # GTIN / MPN — pass through if present from field overrides
-        if product_data.get("gtin"):
-            attrs["gtins"] = [product_data["gtin"]]
-        if product_data.get("mpn"):
-            attrs["mpn"] = product_data["mpn"]
+        # All remaining keys pass through as simple attributes
+        skip_keys = {"gtin", "mpn"}
+        for key, value in data.items():
+            if key in skip_keys:
+                continue
+            if value is not None and value != "":
+                attrs[key] = value
 
         product_input = ProductInput(
-            offer_id=product_data["offer_id"],
-            content_language=product_data.get("content_language", self._content_language),
-            feed_label=product_data.get("feed_label", self._feed_label),
+            offer_id=offer_id,
+            content_language=content_language,
+            feed_label=feed_label,
             product_attributes=ProductAttributes(**attrs),
         )
 
@@ -204,7 +193,7 @@ class GoogleMerchantConnector(CatalogConnector):
         )
 
         response = client.insert_product_input(request=request)
-        return {"name": response.name, "offer_id": product_data["offer_id"]}
+        return {"name": response.name, "offer_id": offer_id}
 
     def delete(self, retailer_id: str) -> dict:
         """Delete a product from Google Merchant Center."""
@@ -213,7 +202,6 @@ class GoogleMerchantConnector(CatalogConnector):
         client = self._get_product_inputs_client()
         data_source = self._get_data_source()
 
-        # Product input name format: accounts/{merchant}/productInputs/{channel}~{lang}~{feed}~{offer}
         product_name = (
             f"{self._parent}/productInputs/"
             f"online~{self._content_language}~{self._feed_label}~{retailer_id}"
@@ -233,27 +221,85 @@ class GoogleMerchantConnector(CatalogConnector):
             raise
 
     def list_products(self) -> list[dict]:
-        """Fetch all products from Google Merchant Center."""
+        """Fetch all products from Google Merchant Center with full details."""
         client = self._get_products_client()
         products = []
 
         try:
             response = client.list_products(parent=self._parent)
             for product in response:
-                attrs = product.product_attributes if product.product_attributes else None
-                products.append({
-                    "retailer_id": product.offer_id or "",
-                    "name": product.name,
-                    "title": attrs.title if attrs else "",
-                    "availability": attrs.availability if attrs else "",
-                })
-        except Exception as e:
+                products.append(self._parse_product(product))
+        except Exception:
             frappe.log_error(
                 title="Catalog Bridge: Google list_products failed",
                 message=frappe.get_traceback(),
             )
 
         return products
+
+    def _parse_product(self, product) -> dict:
+        """Extract all useful fields from a Google Product proto."""
+        import json
+
+        attrs = product.product_attributes
+        status = product.product_status
+
+        data = {
+            "offer_id": product.offer_id or "",
+            "retailer_id": product.offer_id or "",
+            "google_product_name": product.name,
+            "title": attrs.title if attrs else "",
+            "description": attrs.description if attrs else "",
+            "link": attrs.link if attrs else "",
+            "image_link": attrs.image_link if attrs else "",
+            "brand": attrs.brand if attrs else "",
+            "condition": str(attrs.condition).replace("Condition.", "") if attrs and attrs.condition else "",
+            "availability": str(attrs.availability).replace("Availability.", "") if attrs and attrs.availability else "",
+            "product_types": list(attrs.product_types) if attrs and attrs.product_types else [],
+        }
+
+        if attrs and attrs.price and attrs.price.amount_micros:
+            amount = attrs.price.amount_micros / 1_000_000
+            currency = attrs.price.currency_code or "INR"
+            data["price"] = f"{amount:.2f} {currency}"
+        else:
+            data["price"] = ""
+
+        data["google_status"] = "Unknown"
+        destination_statuses = []
+        if status and status.destination_statuses:
+            for ds in status.destination_statuses:
+                ds_dict = {
+                    "reporting_context": str(ds.reporting_context) if ds.reporting_context else "",
+                    "approved_countries": list(ds.approved_countries) if ds.approved_countries else [],
+                    "pending_countries": list(ds.pending_countries) if ds.pending_countries else [],
+                    "disapproved_countries": list(ds.disapproved_countries) if ds.disapproved_countries else [],
+                }
+                destination_statuses.append(ds_dict)
+
+                if ds_dict["disapproved_countries"]:
+                    data["google_status"] = "Disapproved"
+                elif ds_dict["pending_countries"] and data["google_status"] != "Disapproved":
+                    data["google_status"] = "Pending"
+                elif ds_dict["approved_countries"] and data["google_status"] not in ("Disapproved", "Pending"):
+                    data["google_status"] = "Approved"
+
+        data["destination_statuses_raw"] = json.dumps(destination_statuses)
+
+        issues = []
+        if status and status.item_level_issues:
+            for issue in status.item_level_issues:
+                issues.append({
+                    "code": issue.code or "",
+                    "severity": str(issue.severity).replace("Severity.", "") if issue.severity else "",
+                    "description": issue.description or "",
+                    "detail": issue.detail or "",
+                    "attribute": issue.attribute or "",
+                    "documentation": issue.documentation or "",
+                })
+        data["issues"] = json.dumps(issues)
+
+        return data
 
     def get_product(self, retailer_id: str) -> dict:
         """Fetch a single product from Google Merchant Center."""
@@ -282,12 +328,7 @@ class GoogleMerchantConnector(CatalogConnector):
             raise
 
     def bulk_push(self, products: list[dict]) -> dict:
-        """Push products one at a time with rate limiting.
-
-        Google Merchant API counts each insert as a separate API call
-        against quota, even in batch. We do sequential inserts with a
-        small delay to stay within rate limits.
-        """
+        """Push products one at a time with rate limiting."""
         results = {"success": 0, "failed": 0, "errors": []}
 
         for product in products:
@@ -300,100 +341,3 @@ class GoogleMerchantConnector(CatalogConnector):
                 results["errors"].append(f"{product.get('offer_id', '?')}: {e}")
 
         return results
-
-    def _get_price(self, item_code):
-        """Get current price from the configured price list. Returns micros."""
-        price_list = self.platform.price_list
-        price_row = frappe.db.get_value(
-            "Item Price",
-            {
-                "item_code": item_code,
-                "price_list": price_list,
-                "selling": 1,
-            },
-            ["price_list_rate", "currency"],
-            as_dict=True,
-            order_by="valid_from desc",
-        )
-        if not price_row or not price_row.price_list_rate:
-            return None
-
-        # Google uses micros: 1 INR = 1,000,000 micros
-        return {
-            "amount_micros": int(float(price_row.price_list_rate) * 1_000_000),
-            "currency": price_row.currency,
-        }
-
-    def _get_availability(self, website_item):
-        """Get stock availability from Bin."""
-        if not website_item.website_warehouse:
-            return None
-
-        qty = frappe.db.get_value(
-            "Bin",
-            {"item_code": website_item.item_code, "warehouse": website_item.website_warehouse},
-            "actual_qty",
-        )
-        if qty is None:
-            return "OUT_OF_STOCK"
-        return "IN_STOCK" if float(qty) > 0 else "OUT_OF_STOCK"
-
-    def _build_product_url(self, wi):
-        """Build product URL from Jinja template."""
-        template = self.platform.product_url_template or "{{ frontend_url }}/{{ route }}"
-        frontend_url = self.platform.frontend_url or frappe.utils.get_url()
-        frontend_url = frontend_url.rstrip("/")
-
-        try:
-            return frappe.render_template(template, {
-                "frontend_url": frontend_url,
-                "route": wi.route or "",
-                "item_code": wi.item_code or "",
-                "item_name": wi.item_name or "",
-                "name": wi.name or "",
-                "web_item_name": wi.web_item_name or "",
-            })
-        except Exception:
-            return f"{frontend_url}/{wi.route or ''}"
-
-    def _build_image_url(self, wi):
-        """Build image URL. Absolute URLs pass through unchanged."""
-        image = wi.website_image or ""
-        if not image:
-            return ""
-        if image.startswith("http"):
-            return image
-
-        template = self.platform.image_url_template or "{{ frontend_url }}{{ website_image }}"
-        frontend_url = self.platform.frontend_url or frappe.utils.get_url()
-        frontend_url = frontend_url.rstrip("/")
-
-        try:
-            return frappe.render_template(template, {
-                "frontend_url": frontend_url,
-                "website_image": image,
-                "item_code": wi.item_code or "",
-            })
-        except Exception:
-            return f"{frontend_url}{image}"
-
-    def _apply_field_overrides(self, data, wi):
-        """Apply custom field mapping overrides from Catalog Platform child table."""
-        for mapping in self.platform.field_mapping or []:
-            source_val = wi.get(mapping.source_field, "")
-            if source_val is None:
-                source_val = ""
-
-            if mapping.transform == "Strip HTML":
-                source_val = strip_html(str(source_val))
-            elif mapping.transform == "Price to Cents":
-                try:
-                    source_val = int(float(source_val) * 1_000_000)
-                except (ValueError, TypeError):
-                    continue
-            elif mapping.transform == "Boolean to Availability":
-                source_val = "IN_STOCK" if source_val else "OUT_OF_STOCK"
-
-            data[mapping.target_field] = source_val
-
-        return data

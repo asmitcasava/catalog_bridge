@@ -22,6 +22,10 @@ def sync_item(website_item, platform, fields_changed=None):
     except frappe.DoesNotExistError:
         return
 
+    # Skip template/parent items with no warehouse — they have no price or stock
+    if not wi.website_warehouse:
+        return
+
     platform_doc = frappe.get_doc("Catalog Platform", platform)
     if not platform_doc.enabled:
         return
@@ -48,18 +52,9 @@ def sync_item(website_item, platform, fields_changed=None):
     try:
         product_data = connector.transform(wi)
 
-        # If only specific fields changed, trim the payload
+        # If only specific fields changed, trim the payload using mapping-aware filtering
         if fields_changed and action == "Update":
-            trimmed = {"retailer_id": product_data["retailer_id"]}
-            field_map = {
-                "price": ["price", "currency"],
-                "availability": ["availability"],
-            }
-            for field in fields_changed:
-                for key in field_map.get(field, [field]):
-                    if key in product_data:
-                        trimmed[key] = product_data[key]
-            product_data = trimmed
+            product_data = connector.filter_for_update(product_data, fields_changed)
 
         log.request_data = json.dumps(product_data, default=str)
         response = connector.push(product_data)

@@ -188,13 +188,14 @@
   {
    "fieldname": "field_mapping_section",
    "fieldtype": "Section Break",
-   "label": "Field Mapping (Optional Overrides)"
+   "label": "Field Mapping"
   },
   {
+   "description": "JSON array of field mapping entries. Each entry: {source, target, transform?, fallback?, default?, config?, update_group?, is_id?}. Leave blank to use platform defaults.",
    "fieldname": "field_mapping",
-   "fieldtype": "Table",
+   "fieldtype": "Code",
    "label": "Field Mapping",
-   "options": "Catalog Field Mapping"
+   "options": "JSON"
   },
   {
    "fieldname": "alerts_section",
