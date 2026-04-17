@@ -148,16 +148,53 @@ def _reconcile_platform(platform_name):
                 platform=platform_name,
             )
 
-    # Orphans: on platform but not in ERPNext (log for review)
-    orphans = platform_ids - local_ids
-    if orphans:
-        frappe.log_error(
-            title=f"Catalog Bridge: orphan products on {platform_name}",
-            message=f"Products on platform but not in ERPNext: {', '.join(list(orphans)[:20])}",
-        )
+    # Orphans: on platform but not in ERPNext — delete from platform
+    _delete_orphans(connector, platform_name, platform_ids, local_ids)
 
     frappe.db.set_value("Catalog Platform", platform_name, "last_synced", now_datetime())
     frappe.db.commit()
+
+
+def _delete_orphans(connector, platform_name, platform_ids, local_ids):
+    """Delete products that exist on the platform but not in ERPNext.
+
+    Args:
+        connector: A CatalogConnector instance.
+        platform_name: Name of the Catalog Platform doc.
+        platform_ids: Set of retailer_ids currently on the platform.
+        local_ids: Set of item_codes for published Website Items.
+
+    Returns:
+        dict with keys: deleted (int), failed (int), errors (list[str])
+    """
+    orphans = platform_ids - local_ids
+    results = {"deleted": 0, "failed": 0, "errors": []}
+
+    for item_code in orphans:
+        if not item_code:
+            continue
+        try:
+            connector.delete(item_code)
+            results["deleted"] += 1
+        except Exception as e:
+            results["failed"] += 1
+            results["errors"].append(f"{item_code}: {e}")
+            frappe.log_error(
+                title=f"Catalog Bridge: failed to delete orphan {item_code} from {platform_name}",
+                message=frappe.get_traceback(),
+            )
+
+    # Clean up Google Product Feed records for deleted items
+    if orphans:
+        orphan_feeds = frappe.get_all(
+            "Google Product Feed",
+            filters={"offer_id": ["in", list(orphans)], "platform": platform_name},
+            pluck="name",
+        )
+        for feed in orphan_feeds:
+            frappe.delete_doc("Google Product Feed", feed, ignore_permissions=True)
+
+    return results
 
 
 def cleanup_old_sync_logs():
@@ -180,8 +217,17 @@ def cleanup_old_sync_logs():
 
 
 @frappe.whitelist()
-def initial_sync(platform_name):
-    """One-time bulk sync of all published Website Items to a platform.
+def initial_sync(platform_name, delete_orphans=True):
+    """Bulk two-way sync of all published Website Items to a platform.
+
+    Pushes every published Website Item, then deletes orphan products
+    (products on the platform whose Website Item no longer exists or
+    is no longer published).
+
+    Args:
+        platform_name: Name of the Catalog Platform doc.
+        delete_orphans: If True (default), remove products that exist on
+            the platform but not in ERPNext. Pass False to push-only.
 
     Usage:
         bench execute catalog_bridge.tasks.initial_sync --kwargs '{"platform_name": "Meta Catalog"}'
@@ -191,42 +237,63 @@ def initial_sync(platform_name):
     if not platform_doc.enabled:
         frappe.throw(f"Platform {platform_name} is not enabled.")
 
+    # Normalize the delete_orphans flag — Frappe whitelist passes strings from the client
+    if isinstance(delete_orphans, str):
+        delete_orphans = delete_orphans.lower() not in ("false", "0", "no", "")
+
     connector = get_connector(platform_doc)
+    id_field = connector.get_id_field()
 
     website_items = frappe.get_all(
         "Website Item",
         filters={"published": 1},
-        fields=["name"],
+        fields=["name", "item_code"],
     )
+    local_ids = {wi.item_code for wi in website_items}
 
+    # Step 1: Delete orphans before pushing, so the platform state is clean
+    orphan_results = {"deleted": 0, "failed": 0, "errors": []}
+    if delete_orphans:
+        try:
+            platform_products = connector.list_products()
+            platform_ids = {p.get("retailer_id") for p in platform_products}
+            orphan_results = _delete_orphans(connector, platform_name, platform_ids, local_ids)
+        except Exception:
+            frappe.log_error(
+                title=f"Catalog Bridge: orphan fetch failed for {platform_name}",
+                message=frappe.get_traceback(),
+            )
+            orphan_results["errors"].append("Orphan cleanup skipped — could not list platform products.")
+
+    # Step 2: Transform every published Website Item
     products = []
     for wi_ref in website_items:
         try:
             wi = frappe.get_doc("Website Item", wi_ref.name)
             product_data = connector.transform(wi)
             products.append(product_data)
-        except Exception as e:
+        except Exception:
             frappe.log_error(
                 title=f"Catalog Bridge: transform failed for {wi_ref.name}",
                 message=frappe.get_traceback(),
             )
 
-    if not products:
-        return "No published Website Items found."
+    # Step 3: Push
+    if products:
+        results = connector.bulk_push(products)
+    else:
+        results = {"success": 0, "failed": 0, "errors": []}
 
-    results = connector.bulk_push(products)
-
-    # Build a set of failed offer_ids for accurate sync log status
+    # Build a set of failed IDs for accurate sync log status
     failed_ids = set()
     for err in results.get("errors", []):
-        # Error format: "offer_id: error message"
         if ":" in err:
             failed_ids.add(err.split(":")[0].strip())
 
     # Create sync logs per item with accurate status
     for wi_ref, product_data in zip(website_items, products):
-        offer_id = product_data.get("offer_id", "")
-        is_failed = offer_id in failed_ids
+        retailer_id = product_data.get(id_field, "")
+        is_failed = retailer_id in failed_ids
         log = frappe.new_doc("Catalog Sync Log")
         log.website_item = wi_ref.name
         log.platform = platform_name
@@ -235,9 +302,8 @@ def initial_sync(platform_name):
         log.synced_at = now_datetime()
         log.request_data = json.dumps(product_data, default=str)
         if is_failed:
-            # Find the matching error message
             for err in results["errors"]:
-                if err.startswith(offer_id):
+                if err.startswith(retailer_id):
                     log.error_message = err[:500]
                     break
         log.insert(ignore_permissions=True)
@@ -245,7 +311,6 @@ def initial_sync(platform_name):
     frappe.db.set_value("Catalog Platform", platform_name, "last_synced", now_datetime())
     frappe.db.commit()
 
-    # Log errors to Error Log for visibility
     if results["errors"]:
         frappe.log_error(
             title=f"Catalog Bridge: initial_sync to {platform_name}",
@@ -255,10 +320,101 @@ def initial_sync(platform_name):
             ),
         )
 
-    msg = f"Synced {results['success']} of {len(products)} products."
+    # Build user-facing summary
+    parts = []
+    if products:
+        parts.append(f"Synced {results['success']} of {len(products)} products")
+    else:
+        parts.append("No published Website Items found")
+
+    if delete_orphans:
+        if orphan_results["deleted"]:
+            parts.append(f"deleted {orphan_results['deleted']} orphan(s) from platform")
+        elif not orphan_results["errors"]:
+            parts.append("no orphans to delete")
+
     if results["failed"]:
-        msg += f" Failed: {results['failed']}."
+        parts.append(f"{results['failed']} push failures")
+    if orphan_results["failed"]:
+        parts.append(f"{orphan_results['failed']} orphan-delete failures")
+
+    msg = ". ".join(parts) + "."
+
     if results["errors"]:
-        msg += f" Errors: {'; '.join(results['errors'][:5])}"
+        msg += f" Push errors: {'; '.join(results['errors'][:3])}"
+    if orphan_results["errors"]:
+        msg += f" Orphan errors: {'; '.join(orphan_results['errors'][:3])}"
 
     return msg
+
+
+@frappe.whitelist()
+def refresh_google_feed(platform_name):
+    """Fetch all products from Google Merchant Center and update the feed doctype.
+
+    On-demand only — triggered by the "Refresh Google Feed" button on the platform form.
+    """
+    platform_doc = frappe.get_doc("Catalog Platform", platform_name)
+    if platform_doc.platform_type != "Google Merchant Center":
+        frappe.throw("This action is only available for Google Merchant Center platforms.")
+
+    connector = get_connector(platform_doc)
+    products = connector.list_products()
+
+    seen_offer_ids = set()
+    counts = {"Approved": 0, "Disapproved": 0, "Pending": 0, "Unknown": 0}
+
+    for p in products:
+        offer_id = p.get("offer_id")
+        if not offer_id:
+            continue
+
+        seen_offer_ids.add(offer_id)
+
+        # Find matching Website Item by item_code
+        wi_name = frappe.db.get_value("Website Item", {"item_code": offer_id}, "name")
+
+        # Upsert Google Product Feed doc
+        if frappe.db.exists("Google Product Feed", offer_id):
+            doc = frappe.get_doc("Google Product Feed", offer_id)
+        else:
+            doc = frappe.new_doc("Google Product Feed")
+            doc.offer_id = offer_id
+
+        doc.platform = platform_name
+        doc.website_item = wi_name or ""
+        doc.title = p.get("title", "")
+        doc.link = p.get("link", "")
+        doc.image_link = p.get("image_link", "")
+        doc.price = p.get("price", "")
+        doc.availability = p.get("availability", "")
+        doc.condition = p.get("condition", "")
+        doc.brand = p.get("brand", "")
+        doc.google_status = p.get("google_status", "Unknown")
+        doc.issues = p.get("issues", "[]")
+        doc.google_product_name = p.get("google_product_name", "")
+        doc.destination_statuses_raw = p.get("destination_statuses_raw", "[]")
+        doc.last_fetched = now_datetime()
+        doc.save(ignore_permissions=True)
+
+        status = doc.google_status
+        if status in counts:
+            counts[status] += 1
+
+    # Mark products in DB but not in Google as "Removed"
+    existing = frappe.get_all(
+        "Google Product Feed",
+        filters={"platform": platform_name},
+        pluck="offer_id",
+    )
+    for oid in existing:
+        if oid not in seen_offer_ids:
+            frappe.db.set_value("Google Product Feed", oid, "google_status", "Removed")
+
+    frappe.db.commit()
+
+    parts = [f"Refreshed {len(products)} products"]
+    for status, count in counts.items():
+        if count:
+            parts.append(f"{count} {status.lower()}")
+    return ". ".join(parts) + "."
